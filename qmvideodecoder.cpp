@@ -97,6 +97,7 @@ void QmVideoDecoder::run(std::stop_token st)
             frame_rate = av_inv_q(video_stream->time_base);
         }
     }
+    qDebug() << "FPS: " << (frame_rate.num / frame_rate.den);
 
     // 初始化解码器
     const AVCodec* video_codec = avcodec_find_decoder(video_codecpar->codec_id);

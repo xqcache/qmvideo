@@ -83,8 +83,8 @@ private:
 
     std::unique_ptr<QmVideoDecoder> decoder_ { nullptr };
 
-    int video_w_ = 1920;
-    int video_h_ = 1080;
+    int video_w_ = 1254;
+    int video_h_ = 940;
     QByteArray yuv_buf_;
 };
 
@@ -104,6 +104,13 @@ QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
 
         video_w_ = size.width();
         video_h_ = size.height();
+        tex_y_->setSize(video_w_, video_h_);
+        tex_u_->setSize(video_w_ / 2, video_h_ / 2);
+        tex_v_->setSize(video_w_ / 2, video_h_ / 2);
+
+        tex_y_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
+        tex_u_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
+        tex_v_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
     });
 
     QObject::connect(decoder_.get(), &QmVideoDecoder::frameReady, q, [this](const QByteArray& yuv) {
@@ -111,7 +118,7 @@ QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
         q_->update();
     });
 
-    decoder_->setFilePath("I:/1.mp4");
+    decoder_->setFilePath(R"(Y:\电影\C\穿越之旅.mkv)");
     decoder_->start();
 }
 
@@ -149,29 +156,21 @@ void QmVideoPlayerPrivate::init()
     program_->enableAttributeArray(1);
 
     tex_y_->create();
-    tex_y_->setSize(video_w_, video_h_);
     tex_y_->setFormat(QOpenGLTexture::R8_UNorm);
     tex_y_->setMinificationFilter(QOpenGLTexture::Linear);
     tex_y_->setMagnificationFilter(QOpenGLTexture::Linear);
-    tex_y_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
-
     tex_y_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
 
     tex_u_->create();
-    tex_u_->setSize(video_w_ / 2, video_h_ / 2);
     tex_u_->setFormat(QOpenGLTexture::R8_UNorm);
     tex_u_->setMinificationFilter(QOpenGLTexture::Linear);
     tex_u_->setMagnificationFilter(QOpenGLTexture::Linear);
-    tex_u_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
-
     tex_u_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
 
     tex_v_->create();
-    tex_v_->setSize(video_w_ / 2, video_h_ / 2);
     tex_v_->setFormat(QOpenGLTexture::R8_UNorm);
     tex_v_->setMinificationFilter(QOpenGLTexture::Linear);
     tex_v_->setMagnificationFilter(QOpenGLTexture::Linear);
-    tex_v_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
     tex_v_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
 }
 
