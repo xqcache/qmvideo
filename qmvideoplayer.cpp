@@ -1,4 +1,5 @@
 #include "qmvideoplayer.h"
+#include "qmvideodecoder.h"
 #include <QFile>
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions_3_3_Core>
@@ -80,9 +81,11 @@ private:
     std::unique_ptr<QOpenGLTexture> tex_u_;
     std::unique_ptr<QOpenGLTexture> tex_v_;
 
-    int video_w_ = 1254;
-    int video_h_ = 940;
-    char* yuv_buf_ { nullptr };
+    std::unique_ptr<QmVideoDecoder> decoder_ { nullptr };
+
+    int video_w_ = 1920;
+    int video_h_ = 1080;
+    QByteArray yuv_buf_;
 };
 
 QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
@@ -94,28 +97,22 @@ QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
     , tex_y_(new QOpenGLTexture(QOpenGLTexture::Target2D))
     , tex_u_(new QOpenGLTexture(QOpenGLTexture::Target2D))
     , tex_v_(new QOpenGLTexture(QOpenGLTexture::Target2D))
+    , decoder_(new QmVideoDecoder)
 {
+    QObject::connect(decoder_.get(), &QmVideoDecoder::loadFinished, q, [this](const QSize& size) {
+        qDebug() << "Video load finished: " << size;
 
-    {
+        video_w_ = size.width();
+        video_h_ = size.height();
+    });
 
-        if (!yuv_buf_) {
-            yuv_buf_ = new char[video_w_ * video_h_ * 3 / 2];
-        }
-        QFile* file = new QFile("D:/1.yuv", q);
-        file->open(QFile::ReadOnly);
+    QObject::connect(decoder_.get(), &QmVideoDecoder::frameReady, q, [this](const QByteArray& yuv) {
+        yuv_buf_ = yuv;
+        q_->update();
+    });
 
-        QTimer* timer = new QTimer(q);
-        // 25帧视频，每隔40ms刷新一帧
-        timer->setInterval(40);
-        timer->callOnTimeout([file, this] {
-            if (file->atEnd()) {
-                file->seek(0);
-            }
-            file->read(yuv_buf_, video_w_ * video_h_ * 3 / 2);
-            q_->update();
-        });
-        timer->start();
-    }
+    decoder_->setFilePath("I:/1.mp4");
+    decoder_->start();
 }
 
 QmVideoPlayerPrivate::~QmVideoPlayerPrivate() noexcept
@@ -186,9 +183,9 @@ void QmVideoPlayerPrivate::paint()
 
     QOpenGLPixelTransferOptions options;
     options.setAlignment(1);
-    tex_y_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_, &options);
-    tex_u_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_ + video_w_ * video_h_, &options);
-    tex_v_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_ + video_w_ * video_h_ * 5 / 4, &options);
+    tex_y_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_.constData(), &options);
+    tex_u_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_.constData() + video_w_ * video_h_, &options);
+    tex_v_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_.constData() + video_w_ * video_h_ * 5 / 4, &options);
 
     tex_y_->bind(0);
     tex_u_->bind(1);
