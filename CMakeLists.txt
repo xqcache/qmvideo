@@ -19,5 +19,16 @@ add_executable(${TARGET_NAME} main.cpp
     qmvideoplayer.h qmvideoplayer.cpp
     qmvideodecoder.h qmvideodecoder.cpp
 )
-target_link_libraries(${TARGET_NAME} PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGLWidgets Qt${QT_VERSION_MAJOR}::OpenGL libffmpeg)
-add_subdirectory(3rdparty)
+target_link_libraries(${TARGET_NAME} PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGLWidgets Qt${QT_VERSION_MAJOR}::OpenGL)
+add_subdirectory(thirdparty)
+
+set(FFMPEG_LIBS ffmpeg::avformat ffmpeg::swscale)
+target_link_libraries(${TARGET_NAME} PRIVATE ${FFMPEG_LIBS})
+
+set(ffmpeg_targets "")
+ParseDependTargets(ffmpeg_targets TARGETS ${FFMPEG_LIBS})
+
+foreach(_dll ${ffmpeg_targets})
+    add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+endforeach()

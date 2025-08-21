@@ -104,6 +104,7 @@ QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
 
         video_w_ = size.width();
         video_h_ = size.height();
+
         tex_y_->setSize(video_w_, video_h_);
         tex_u_->setSize(video_w_ / 2, video_h_ / 2);
         tex_v_->setSize(video_w_ / 2, video_h_ / 2);
@@ -118,7 +119,7 @@ QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
         q_->update();
     });
 
-    decoder_->setFilePath(R"(Y:\电影\C\穿越之旅.mkv)");
+    decoder_->setFilePath(R"(C:\Users\xqliang\Desktop\a_sky_full_of_stars-480p.mp4)");
     decoder_->start();
 }
 
@@ -155,6 +156,7 @@ void QmVideoPlayerPrivate::init()
     program_->setAttributeArray(1, GL_FLOAT, (void*)(2 * sizeof(GLfloat)), 2, 4 * sizeof(GLfloat));
     program_->enableAttributeArray(1);
 
+    // 在OpenGL上下文中初始化纹理
     tex_y_->create();
     tex_y_->setFormat(QOpenGLTexture::R8_UNorm);
     tex_y_->setMinificationFilter(QOpenGLTexture::Linear);
@@ -177,6 +179,11 @@ void QmVideoPlayerPrivate::init()
 void QmVideoPlayerPrivate::paint()
 {
     glClear(GL_COLOR_BUFFER_BIT);
+
+    // 检查是否有有效的YUV数据
+    if (yuv_buf_.isEmpty()) {
+        return; // 没有有效数据时不渲染
+    }
 
     program_->bind();
 
