@@ -120,6 +120,7 @@ QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
     });
 
     decoder_->setFilePath(R"(C:\Users\xqliang\Desktop\a_sky_full_of_stars-480p.mp4)");
+    decoder_->setLoop();
     decoder_->start();
 }
 

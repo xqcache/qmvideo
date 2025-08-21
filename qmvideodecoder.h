@@ -23,6 +23,8 @@ signals:
 private:
     void run(std::stop_token st);
 
+    
+
 private:
     std::stop_source stop_source_;
     QThread* thread_ { nullptr };

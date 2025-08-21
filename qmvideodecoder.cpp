@@ -49,6 +49,11 @@ void QmVideoDecoder::setFilePath(const QString& video_path)
     file_path_ = video_path;
 }
 
+void QmVideoDecoder::setLoop(bool loop)
+{
+    loop_ = loop;
+}
+
 void QmVideoDecoder::run(std::stop_token st)
 {
     if (!QFile::exists(file_path_)) {
@@ -119,7 +124,10 @@ void QmVideoDecoder::run(std::stop_token st)
     int width = video_codecpar->width;
     int height = video_codecpar->height;
 
-    std::mutex mutex;
+    auto frame_duration = std::chrono::milliseconds(1000 / (frame_rate.num / frame_rate.den));
+    std::chrono::steady_clock::time_point frame_time = std::chrono::steady_clock::now();
+
+    std::mutex wait_mutex;
     do {
         while (!st.stop_requested() && av_read_frame(format_ctx, packet) >= 0) {
             if (packet->stream_index == video_index) {
@@ -135,8 +143,9 @@ void QmVideoDecoder::run(std::stop_token st)
                         emit frameReady(yuv_data);
 
                         // 条件等待
-                        std::unique_lock<std::mutex> lock(mutex);
-                        std::condition_variable_any().wait_for(lock, st, std::chrono::milliseconds(1000 / (frame_rate.num / frame_rate.den)), [] { return false; });
+                        std::unique_lock<std::mutex> lock(wait_mutex);
+                        std::condition_variable_any().wait_until(lock, st, frame_time + frame_duration, [] { return false; });
+                        frame_time = std::chrono::steady_clock::now();
                     }
                 }
             }
