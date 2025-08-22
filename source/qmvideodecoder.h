@@ -4,9 +4,11 @@
 #include <QVariant>
 #include <stop_token>
 
+#include "qmvideo_global.h"
+
 struct QmVideoDecoderPrivate;
 
-class QmVideoDecoder : public QObject {
+class QMVIDEO_LIB_EXPORT QmVideoDecoder : public QObject {
     Q_OBJECT
 public:
     enum State {

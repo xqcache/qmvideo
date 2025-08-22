@@ -1,10 +1,11 @@
 #pragma once
 
+#include "qmvideo_global.h"
 #include <QOpenGLWidget>
 
 class QmYuvViewPrivate;
 
-class QmYuvView : public QOpenGLWidget {
+class QMVIDEO_LIB_EXPORT QmYuvView : public QOpenGLWidget {
     Q_OBJECT
 public:
     explicit QmYuvView(QWidget* parent = nullptr);
