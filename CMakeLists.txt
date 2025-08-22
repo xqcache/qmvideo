@@ -16,7 +16,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 
 add_executable(${TARGET_NAME} main.cpp
-    qmvideoplayer.h qmvideoplayer.cpp
+    qmyuvview.h qmyuvview.cpp
     qmvideodecoder.h qmvideodecoder.cpp
 )
 target_link_libraries(${TARGET_NAME} PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGLWidgets Qt${QT_VERSION_MAJOR}::OpenGL)

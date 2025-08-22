@@ -1,33 +1,57 @@
 #pragma
 
 #include <QObject>
+#include <QVariant>
 #include <stop_token>
+
+struct QmVideoDecoderPrivate;
 
 class QmVideoDecoder : public QObject {
     Q_OBJECT
 public:
+    enum State {
+        Idle,
+        Waiting,
+        Playing,
+        Paused
+    };
+
+    enum Format {
+        Yuv420p,
+        Image,
+    };
+
     QmVideoDecoder();
     ~QmVideoDecoder() noexcept override;
 
-    void start();
-    void stop();
-    void setFilePath(const QString& video_path);
+    QSize size() const;
+    QString path() const;
+    State state() const;
+    bool isPlaying() const;
+    bool isPaused() const;
+    bool isWaiting() const;
+    double fps() const;
+    qint64 frameCount() const;
 
+    bool open(const QString& video_path);
+    void close();
     void setLoop(bool loop = true);
+    void setFrameStep(qint64 frame_step);
+    void setOutputFormat(Format format);
+
+    void play();
+    void pause();
+    void stop();
 
 signals:
     void finished();
     void loadFinished(const QSize& size);
-    void frameReady(const QByteArray& yuv);
+    void frameReady(const QVariant& frame_data);
 
 private:
     void run(std::stop_token st);
-
-    
+    QVariant decodeFrame(qint64 frame_no, int* error = nullptr) const;
 
 private:
-    std::stop_source stop_source_;
-    QThread* thread_ { nullptr };
-    QString file_path_;
-    bool loop_ { false };
+    QmVideoDecoderPrivate* d_ { nullptr };
 };

@@ -1,100 +1,122 @@
 #include "qmvideodecoder.h"
 #include <QDebug>
 #include <QFile>
+#include <QImage>
 #include <QSize>
 #include <QThread>
 #include <QTimer>
 #include <chrono>
 
 extern "C" {
-#include "libavcodec/avcodec.h"
-#include "libavformat/avformat.h"
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/imgutils.h>
+#include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 }
 
-QmVideoDecoder::QmVideoDecoder()
-    : thread_(new QThread)
+namespace {
+QByteArray decodeToYuv(AVFrame* frame, int width, int height)
 {
-    moveToThread(thread_);
-    connect(thread_, &QThread::started, this, [this] {
-        run(stop_source_.get_token());
+    int y_size = width * height;
+    int uv_size = (width / 2) * (height / 2);
+    QByteArray yuv_data;
+    yuv_data.resize(width * height * 3 / 2, 0);
+    std::copy_n(frame->data[0], y_size, yuv_data.data());
+    std::copy_n(frame->data[1], uv_size, yuv_data.data() + y_size);
+    std::copy_n(frame->data[2], uv_size, yuv_data.data() + y_size + uv_size);
+    return yuv_data;
+}
+
+QImage decodeToImage(SwsContext* sws_ctx, AVFrame* frame, AVFrame* rgb_frame, uint8_t* rgb_buffer, int width, int height)
+{
+    if (sws_scale(sws_ctx, frame->data, frame->linesize, 0, height, rgb_frame->data, rgb_frame->linesize) > 0) {
+
+        QImage img(rgb_frame->data[0], width, height, rgb_frame->linesize[0], QImage::Format_RGB888);
+
+        if (!img.isNull()) {
+            return img.copy();
+        }
+    }
+    return {};
+}
+}
+
+struct QmVideoDecoderPrivate {
+    AVFormatContext* fmt_ctx { nullptr };
+    AVCodecContext* video_codec_ctx { nullptr };
+    AVPacket* packet { nullptr };
+    AVFrame* frame { nullptr };
+
+    SwsContext* sws_ctx { nullptr };
+    AVFrame* rgb_frame { nullptr };
+    uint8_t* rgb_buffer { nullptr };
+
+    QString video_path;
+    double fps { 1 };
+    // 视频时长（单位：ms）
+    double duration { 0 };
+    qint64 frame_count { 0 };
+    int video_stream_idx = -1;
+    QSize video_size { 0, 0 };
+    QmVideoDecoder::Format format { QmVideoDecoder::Yuv420p };
+
+    qint64 frame_index { 0 };
+    std::atomic<qint64> frame_step { 1 };
+    std::atomic_bool loop { false };
+
+    QThread* thread { nullptr };
+    std::mutex wait_mutex;
+    std::stop_source stop_source;
+    QmVideoDecoder::State state { QmVideoDecoder::Idle };
+};
+
+QmVideoDecoder::QmVideoDecoder()
+    : d_(new QmVideoDecoderPrivate)
+{
+    d_->thread = new QThread();
+
+    moveToThread(d_->thread);
+    connect(d_->thread, &QThread::started, this, [this] {
+        run(d_->stop_source.get_token());
     });
-    connect(thread_, &QThread::finished, this, &QmVideoDecoder::finished);
+    connect(d_->thread, &QThread::finished, this, &QmVideoDecoder::finished);
 }
 
 QmVideoDecoder::~QmVideoDecoder() noexcept
 {
-    stop();
-    delete thread_;
+    close();
+    delete d_;
 }
 
-void QmVideoDecoder::start()
+bool QmVideoDecoder::open(const QString& video_path)
 {
-    if (stop_source_.stop_requested()) {
-        stop_source_ = std::stop_source();
-    }
-    if (!thread_->isRunning()) {
-        thread_->start();
-    }
-}
-
-void QmVideoDecoder::stop()
-{
-    stop_source_.request_stop();
-    thread_->quit();
-    thread_->wait();
-}
-
-void QmVideoDecoder::setFilePath(const QString& video_path)
-{
-    file_path_ = video_path;
-}
-
-void QmVideoDecoder::setLoop(bool loop)
-{
-    loop_ = loop;
-}
-
-void QmVideoDecoder::run(std::stop_token st)
-{
-    if (!QFile::exists(file_path_)) {
-        qDebug() << file_path_ << "does not exists!";
-        return;
-    }
-
-    AVFormatContext* format_ctx = nullptr;
-    if (avformat_open_input(&format_ctx, file_path_.toStdString().c_str(), nullptr, nullptr) < 0) {
-        qDebug() << "Failed to open " << file_path_;
-
-        return;
-    }
-
-    auto format_ctx_guard = qScopeGuard([&format_ctx] {
-        avformat_close_input(&format_ctx);
+    QElapsedTimer elapsed_timer;
+    elapsed_timer.start();
+    auto elapsed_guard = qScopeGuard([&elapsed_timer] {
+        qDebug() << "QmVideoDecoder::open. elapsed: " << elapsed_timer.elapsed() << "ms";
     });
-
-    if (avformat_find_stream_info(format_ctx, nullptr) < 0) {
-        return;
+    close();
+    if (!QFile::exists(video_path)) {
+        return false;
+    }
+    if (avformat_open_input(&d_->fmt_ctx, video_path.toStdString().c_str(), nullptr, nullptr) < 0) {
+        qDebug() << "Failed to open " << video_path;
+        return false;
+    }
+    if (avformat_find_stream_info(d_->fmt_ctx, nullptr) < 0) {
+        return false;
     }
 
-    unsigned int video_index = -1;
-    AVCodecParameters* video_codecpar = nullptr;
-    for (unsigned int i = 0; i < format_ctx->nb_streams; ++i) {
-        if (format_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            video_index = i;
-            video_codecpar = format_ctx->streams[i]->codecpar;
-            break;
-        }
-    }
-
-    if (video_index < 0) {
+    const AVCodec* video_codec = nullptr;
+    d_->video_stream_idx = av_find_best_stream(d_->fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &video_codec, 0);
+    if (d_->video_stream_idx < 0 || !video_codec) {
         qDebug() << "Faield to find video stream!";
-        return;
+        return false;
     }
-
-    emit loadFinished({ video_codecpar->width, video_codecpar->height });
-
     // 获取帧率
-    AVStream* video_stream = format_ctx->streams[video_index];
+    AVStream* video_stream = d_->fmt_ctx->streams[d_->video_stream_idx];
+
     AVRational frame_rate = video_stream->avg_frame_rate;
     if (frame_rate.num == 0 || frame_rate.den == 0) {
         frame_rate = video_stream->r_frame_rate;
@@ -102,59 +124,260 @@ void QmVideoDecoder::run(std::stop_token st)
             frame_rate = av_inv_q(video_stream->time_base);
         }
     }
-    qDebug() << "FPS: " << (frame_rate.num / frame_rate.den);
+    d_->fps = av_q2d(frame_rate);
+    d_->duration = (static_cast<double>(d_->fmt_ctx->duration) / AV_TIME_BASE) * 1000.0;
+    d_->frame_count = std::llround(d_->duration * d_->fps / 1000.0);
+    d_->video_size = { video_stream->codecpar->width, video_stream->codecpar->height };
+    d_->video_path = video_path;
 
-    // 初始化解码器
-    const AVCodec* video_codec = avcodec_find_decoder(video_codecpar->codec_id);
-    if (!video_codec) {
-        qDebug() << "Failed to find video codec!";
-        return;
-    }
-
-    AVCodecContext* video_codec_ctx = avcodec_alloc_context3(video_codec);
-    avcodec_parameters_to_context(video_codec_ctx, video_codecpar);
-    if (avcodec_open2(video_codec_ctx, video_codec, nullptr) < 0) {
+    d_->video_codec_ctx = avcodec_alloc_context3(video_codec);
+    avcodec_parameters_to_context(d_->video_codec_ctx, video_stream->codecpar);
+    if (avcodec_open2(d_->video_codec_ctx, video_codec, nullptr) < 0) {
         qDebug() << "Failed to open codec!";
-        return;
+        return false;
+    }
+    d_->packet = av_packet_alloc();
+    d_->frame = av_frame_alloc();
+
+    if (d_->format == Image && !d_->sws_ctx) {
+        // 初始化转换器
+        d_->sws_ctx = sws_getContext(d_->video_size.width(), d_->video_size.height(), d_->video_codec_ctx->pix_fmt, d_->video_size.width(), d_->video_size.height(), AV_PIX_FMT_RGB24,
+            SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        d_->rgb_frame = av_frame_alloc();
+        int rgb_buffer_size = av_image_get_buffer_size(AV_PIX_FMT_RGB24, d_->video_size.width(), d_->video_size.height(), 1);
+        d_->rgb_buffer = (uint8_t*)av_malloc(rgb_buffer_size);
+        av_image_fill_arrays(d_->rgb_frame->data, d_->rgb_frame->linesize, d_->rgb_buffer, AV_PIX_FMT_RGB24, d_->video_size.width(), d_->video_size.height(), 1);
     }
 
-    AVPacket* packet = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
+    d_->state = Waiting;
 
-    int width = video_codecpar->width;
-    int height = video_codecpar->height;
+    emit loadFinished(d_->video_size);
 
-    auto frame_duration = std::chrono::milliseconds(1000 / (frame_rate.num / frame_rate.den));
-    std::chrono::steady_clock::time_point frame_time = std::chrono::steady_clock::now();
+    return true;
+}
 
-    std::mutex wait_mutex;
-    do {
-        while (!st.stop_requested() && av_read_frame(format_ctx, packet) >= 0) {
-            if (packet->stream_index == video_index) {
-                if (avcodec_send_packet(video_codec_ctx, packet) == 0) {
-                    while (!st.stop_requested() && avcodec_receive_frame(video_codec_ctx, frame) == 0) {
-                        int y_size = width * height;
-                        int uv_size = (width / 2) * (height / 2);
-                        QByteArray yuv_data;
-                        yuv_data.resize(width * height * 3 / 2, 0);
-                        std::copy_n(frame->data[0], y_size, yuv_data.data());
-                        std::copy_n(frame->data[1], uv_size, yuv_data.data() + y_size);
-                        std::copy_n(frame->data[2], uv_size, yuv_data.data() + y_size + uv_size);
-                        emit frameReady(yuv_data);
+void QmVideoDecoder::close()
+{
+    d_->stop_source.request_stop();
+    if (d_->thread->isRunning()) {
+        d_->thread->quit();
+        d_->thread->wait();
+    }
+    if (d_->frame) {
+        av_frame_free(&d_->frame);
+    }
+    if (d_->rgb_frame) {
+        av_frame_free(&d_->rgb_frame);
+    }
+    if (d_->rgb_buffer) {
+        av_free(d_->rgb_buffer);
+        d_->rgb_buffer = nullptr;
+    }
+    if (d_->packet) {
+        av_packet_free(&d_->packet);
+    }
+    if (d_->sws_ctx) {
+        sws_freeContext(d_->sws_ctx);
+        d_->sws_ctx = nullptr;
+    }
+    if (d_->video_codec_ctx) {
+        avcodec_free_context(&d_->video_codec_ctx);
+    }
+    if (d_->fmt_ctx) {
+        avformat_close_input(&d_->fmt_ctx);
+    }
+    d_->video_stream_idx = -1;
+    d_->video_path = "";
+    d_->frame_count = 0;
+    d_->duration = 0;
+    d_->fps = 1.0;
+    d_->state = Idle;
+}
 
-                        // 条件等待
-                        std::unique_lock<std::mutex> lock(wait_mutex);
-                        std::condition_variable_any().wait_until(lock, st, frame_time + frame_duration, [] { return false; });
-                        frame_time = std::chrono::steady_clock::now();
+void QmVideoDecoder::setFrameStep(qint64 frame_step)
+{
+    if (frame_step == 0) {
+        frame_step = 1;
+    }
+    d_->frame_step = frame_step;
+}
+
+void QmVideoDecoder::setLoop(bool loop)
+{
+    d_->loop.store(loop, std::memory_order_relaxed);
+}
+
+void QmVideoDecoder::setOutputFormat(Format format)
+{
+    d_->format = format;
+    if (d_->state == Waiting && format == Image && !d_->sws_ctx) {
+        // 初始化转换器
+        d_->sws_ctx = sws_getContext(d_->video_size.width(), d_->video_size.height(), d_->video_codec_ctx->pix_fmt, d_->video_size.width(), d_->video_size.height(), AV_PIX_FMT_RGB24,
+            SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        d_->rgb_frame = av_frame_alloc();
+        int rgb_buffer_size = av_image_get_buffer_size(AV_PIX_FMT_RGB24, d_->video_size.width(), d_->video_size.height(), 1);
+        d_->rgb_buffer = (uint8_t*)av_malloc(rgb_buffer_size);
+        av_image_fill_arrays(d_->rgb_frame->data, d_->rgb_frame->linesize, d_->rgb_buffer, AV_PIX_FMT_RGB24, d_->video_size.width(), d_->video_size.height(), 1);
+    }
+}
+
+void QmVideoDecoder::play()
+{
+    if (d_->state != Waiting && d_->state != Paused) {
+        return;
+    }
+    d_->state = Playing;
+    if (!d_->thread->isRunning()) {
+        d_->stop_source = std::stop_source();
+        d_->thread->start();
+    }
+}
+
+void QmVideoDecoder::pause()
+{
+    if (d_->state != Playing) {
+        return;
+    }
+    d_->state = Paused;
+}
+
+void QmVideoDecoder::stop()
+{
+    if (d_->state == Idle) {
+        return;
+    }
+    d_->stop_source.request_stop();
+    if (d_->thread->isRunning()) {
+        d_->thread->quit();
+        d_->thread->wait();
+    }
+    d_->frame_index = (d_->frame_step < 0) ? d_->frame_count : 0;
+    av_seek_frame(d_->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+    d_->state = Waiting;
+}
+
+bool QmVideoDecoder::isPlaying() const
+{
+    return d_->state == Playing;
+}
+
+bool QmVideoDecoder::isPaused() const
+{
+    return d_->state == Paused || d_->state == Waiting;
+}
+
+bool QmVideoDecoder::isWaiting() const
+{
+    return d_->state == Waiting;
+}
+
+QSize QmVideoDecoder::size() const
+{
+    return d_->video_size;
+}
+
+QVariant QmVideoDecoder::decodeFrame(qint64 frame_no, int* error) const
+{
+    std::unique_ptr<int> ffmpeg_ret_guard(new int);
+    int* ret { nullptr };
+    if (error) {
+        ret = error;
+    } else {
+        ret = ffmpeg_ret_guard.get();
+    }
+    if (d_->state == Idle) {
+        return {};
+    }
+    if (d_->frame_step != 1) {
+        int64_t timestamp = static_cast<double>(frame_no) / d_->fps * AV_TIME_BASE;
+        if ((*ret = av_seek_frame(d_->fmt_ctx, -1, timestamp, AVSEEK_FLAG_BACKWARD)) < 0) {
+            return {};
+        }
+        avcodec_flush_buffers(d_->video_codec_ctx);
+    }
+
+    for (int attempts = 0; attempts < 20; ++attempts) {
+        *ret = av_read_frame(d_->fmt_ctx, d_->packet);
+        // 读取文件末尾了
+        if (*ret == AVERROR_EOF) {
+            return {};
+        }
+        if (*ret < 0) {
+            continue;
+        }
+        if (d_->packet->stream_index == d_->video_stream_idx) {
+            if ((*ret = avcodec_send_packet(d_->video_codec_ctx, d_->packet)) == 0) {
+                if ((*ret = avcodec_receive_frame(d_->video_codec_ctx, d_->frame)) == 0) {
+                    // switch (d_->frame->pict_type) {
+                    // case AV_PICTURE_TYPE_I:
+                    //     qDebug() << "=> I: " << d_->frame->pts;
+                    //     break;
+                    // case AV_PICTURE_TYPE_P:
+                    //     qDebug() << "   P: " << d_->frame->pts;
+                    //     break;
+                    // case AV_PICTURE_TYPE_B:
+                    //     qDebug() << "   B: " << d_->frame->pts;
+                    //     break;
+                    // default:
+                    //     // 其他类型（如 AV_PICTURE_TYPE_S、AV_PICTURE_TYPE_SI、AV_PICTURE_TYPE_SP 等）
+                    //     break;
+                    // }
+                    if (d_->format == Yuv420p) {
+                        av_packet_unref(d_->packet);
+                        return decodeToYuv(d_->frame, d_->video_size.width(), d_->video_size.height());
+                    } else {
+                        av_packet_unref(d_->packet);
+                        return decodeToImage(d_->sws_ctx, d_->frame, d_->rgb_frame, d_->rgb_buffer, d_->video_size.width(), d_->video_size.height());
                     }
                 }
             }
-            av_packet_unref(packet);
+            av_packet_unref(d_->packet);
         }
-        av_seek_frame(format_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
-    } while (!st.stop_requested() && loop_);
+    }
+    return {};
+}
 
-    av_frame_free(&frame);
-    av_packet_free(&packet);
-    avcodec_free_context(&video_codec_ctx);
+void QmVideoDecoder::run(std::stop_token st)
+{
+    if (d_->state != Playing) {
+        return;
+    }
+    d_->frame_index = (d_->frame_step < 0) ? d_->frame_count : 0;
+    QElapsedTimer elapsed_timer;
+
+    auto frame_duration = std::chrono::duration<double, std::milli>(1000 / d_->fps);
+    std::chrono::steady_clock::time_point frame_time = std::chrono::steady_clock::now();
+    auto wait = [this, &st, &frame_time, &frame_duration] {
+        std::unique_lock<std::mutex> lock(d_->wait_mutex);
+        std::condition_variable_any().wait_until(lock, st, frame_time + frame_duration, [] { return false; });
+        frame_time = std::chrono::steady_clock::now();
+    };
+
+    while (!st.stop_requested()) {
+        elapsed_timer.restart();
+
+        if (d_->state == Paused) {
+            wait();
+            continue;
+        } else {
+            int ret = 0;
+            auto frame_data = decodeFrame(d_->frame_index, &ret);
+            if (frame_data.isValid()) {
+                emit frameReady(frame_data);
+            }
+            d_->frame_index += d_->frame_step;
+            if ((d_->frame_index > d_->frame_count || d_->frame_index < 0) || ret == AVERROR_EOF) {
+                if (d_->loop) {
+                    d_->frame_index = (d_->frame_step < 0) ? d_->frame_count : 0;
+                    av_seek_frame(d_->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+                } else {
+                    break;
+                }
+            }
+            wait();
+        }
+        // qDebug() << "Elapsed: " << elapsed_timer.elapsed();
+    }
+    d_->frame_index = (d_->frame_step < 0) ? d_->frame_count : 0;
+    d_->state = Waiting;
 }

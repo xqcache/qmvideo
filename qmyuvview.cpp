@@ -1,6 +1,7 @@
-#include "qmvideoplayer.h"
+#include "qmyuvview.h"
 #include "qmvideodecoder.h"
 #include <QFile>
+#include <QKeyEvent>
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLPixelTransferOptions>
@@ -62,16 +63,19 @@ constexpr std::string_view kFragmentShaderCode = R"(
 GLuint tex_y, tex_u, tex_v;
 }
 
-class QmVideoPlayerPrivate : private QOpenGLFunctions_3_3_Core {
+class QmYuvViewPrivate : private QOpenGLFunctions_3_3_Core {
 public:
-    QmVideoPlayerPrivate(QmVideoPlayer* q);
-    ~QmVideoPlayerPrivate() noexcept;
+    QmYuvViewPrivate(QmYuvView* q);
+    ~QmYuvViewPrivate() noexcept;
 
     void init();
     void paint();
 
+    void setSize(const QSize& yuv_size);
+    void setBuffer(const QByteArray& yuv_buf);
+
 private:
-    QmVideoPlayer* q_ { nullptr };
+    QmYuvView* q_ { nullptr };
     QOpenGLShaderProgram* program_ { nullptr };
     QOpenGLVertexArrayObject* vao_ { nullptr };
     std::unique_ptr<QOpenGLBuffer> vbo_;
@@ -81,14 +85,11 @@ private:
     std::unique_ptr<QOpenGLTexture> tex_u_;
     std::unique_ptr<QOpenGLTexture> tex_v_;
 
-    std::unique_ptr<QmVideoDecoder> decoder_ { nullptr };
-
-    int video_w_ = 1254;
-    int video_h_ = 940;
+    QSize yuv_size_ { 1254, 940 };
     QByteArray yuv_buf_;
 };
 
-QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
+QmYuvViewPrivate::QmYuvViewPrivate(QmYuvView* q)
     : q_(q)
     , program_(new QOpenGLShaderProgram(q))
     , vao_(new QOpenGLVertexArrayObject(q))
@@ -97,38 +98,14 @@ QmVideoPlayerPrivate::QmVideoPlayerPrivate(QmVideoPlayer* q)
     , tex_y_(new QOpenGLTexture(QOpenGLTexture::Target2D))
     , tex_u_(new QOpenGLTexture(QOpenGLTexture::Target2D))
     , tex_v_(new QOpenGLTexture(QOpenGLTexture::Target2D))
-    , decoder_(new QmVideoDecoder)
-{
-    QObject::connect(decoder_.get(), &QmVideoDecoder::loadFinished, q, [this](const QSize& size) {
-        qDebug() << "Video load finished: " << size;
-
-        video_w_ = size.width();
-        video_h_ = size.height();
-
-        tex_y_->setSize(video_w_, video_h_);
-        tex_u_->setSize(video_w_ / 2, video_h_ / 2);
-        tex_v_->setSize(video_w_ / 2, video_h_ / 2);
-
-        tex_y_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
-        tex_u_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
-        tex_v_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
-    });
-
-    QObject::connect(decoder_.get(), &QmVideoDecoder::frameReady, q, [this](const QByteArray& yuv) {
-        yuv_buf_ = yuv;
-        q_->update();
-    });
-
-    decoder_->setFilePath(R"(C:\Users\xqliang\Desktop\a_sky_full_of_stars-480p.mp4)");
-    decoder_->setLoop();
-    decoder_->start();
-}
-
-QmVideoPlayerPrivate::~QmVideoPlayerPrivate() noexcept
 {
 }
 
-void QmVideoPlayerPrivate::init()
+QmYuvViewPrivate::~QmYuvViewPrivate() noexcept
+{
+}
+
+void QmYuvViewPrivate::init()
 {
     initializeOpenGLFunctions();
 
@@ -163,21 +140,82 @@ void QmVideoPlayerPrivate::init()
     tex_y_->setMinificationFilter(QOpenGLTexture::Linear);
     tex_y_->setMagnificationFilter(QOpenGLTexture::Linear);
     tex_y_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
+    tex_y_->setSize(yuv_size_.width(), yuv_size_.height());
+    tex_y_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
 
     tex_u_->create();
     tex_u_->setFormat(QOpenGLTexture::R8_UNorm);
     tex_u_->setMinificationFilter(QOpenGLTexture::Linear);
     tex_u_->setMagnificationFilter(QOpenGLTexture::Linear);
     tex_u_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
+    tex_u_->setSize(yuv_size_.width() / 2, yuv_size_.height() / 2);
+    tex_u_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
 
     tex_v_->create();
     tex_v_->setFormat(QOpenGLTexture::R8_UNorm);
     tex_v_->setMinificationFilter(QOpenGLTexture::Linear);
     tex_v_->setMagnificationFilter(QOpenGLTexture::Linear);
     tex_v_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
+    tex_v_->setSize(yuv_size_.width() / 2, yuv_size_.height() / 2);
+    tex_v_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
 }
 
-void QmVideoPlayerPrivate::paint()
+void QmYuvViewPrivate::setSize(const QSize& size)
+{
+    if (yuv_size_ == size) {
+        return;
+    }
+    yuv_size_ = size;
+    q_->makeCurrent();
+    // 在OpenGL上下文中初始化纹理
+    if (tex_y_->isStorageAllocated()) {
+        tex_y_->destroy();
+        tex_y_->create();
+        tex_y_->setFormat(QOpenGLTexture::R8_UNorm);
+        tex_y_->setMinificationFilter(QOpenGLTexture::Linear);
+        tex_y_->setMagnificationFilter(QOpenGLTexture::Linear);
+        tex_y_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
+        tex_y_->setSize(size.width(), size.height());
+        tex_y_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
+    } else {
+        tex_y_->setSize(size.width(), size.height());
+        tex_y_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
+    }
+    if (tex_u_->isStorageAllocated()) {
+        tex_u_->destroy();
+        tex_u_->create();
+        tex_u_->setFormat(QOpenGLTexture::R8_UNorm);
+        tex_u_->setMinificationFilter(QOpenGLTexture::Linear);
+        tex_u_->setMagnificationFilter(QOpenGLTexture::Linear);
+        tex_u_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
+        tex_u_->setSize(size.width() / 2, size.height() / 2);
+        tex_u_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
+    } else {
+        tex_u_->setSize(size.width() / 2, size.height() / 2);
+        tex_u_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
+    }
+    if (tex_v_->isStorageAllocated()) {
+        tex_v_->destroy();
+        tex_v_->create();
+        tex_v_->setFormat(QOpenGLTexture::R8_UNorm);
+        tex_v_->setMinificationFilter(QOpenGLTexture::Linear);
+        tex_v_->setMagnificationFilter(QOpenGLTexture::Linear);
+        tex_v_->setWrapMode(QOpenGLTexture::WrapMode::ClampToEdge);
+        tex_v_->setSize(size.width() / 2, size.height() / 2);
+        tex_v_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
+    } else {
+        tex_v_->setSize(size.width() / 2, size.height() / 2);
+        tex_v_->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt8);
+    }
+    q_->doneCurrent();
+}
+
+void QmYuvViewPrivate::setBuffer(const QByteArray& yuv_buf)
+{
+    yuv_buf_ = yuv_buf;
+}
+
+void QmYuvViewPrivate::paint()
 {
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -191,8 +229,8 @@ void QmVideoPlayerPrivate::paint()
     QOpenGLPixelTransferOptions options;
     options.setAlignment(1);
     tex_y_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_.constData(), &options);
-    tex_u_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_.constData() + video_w_ * video_h_, &options);
-    tex_v_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_.constData() + video_w_ * video_h_ * 5 / 4, &options);
+    tex_u_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_.constData() + yuv_size_.width() * yuv_size_.height(), &options);
+    tex_v_->setData(QOpenGLTexture::Red, QOpenGLTexture::UInt8, yuv_buf_.constData() + yuv_size_.width() * yuv_size_.height() * 5 / 4, &options);
 
     tex_y_->bind(0);
     tex_u_->bind(1);
@@ -206,27 +244,34 @@ void QmVideoPlayerPrivate::paint()
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 }
 
-QmVideoPlayer::QmVideoPlayer(QWidget* parent)
+QmYuvView::QmYuvView(QWidget* parent)
     : QOpenGLWidget(parent)
-    , d_(new QmVideoPlayerPrivate(this))
+    , d_(new QmYuvViewPrivate(this))
 {
 }
 
-QmVideoPlayer::~QmVideoPlayer() noexcept
+QmYuvView::~QmYuvView() noexcept
 {
     delete d_;
 }
 
-void QmVideoPlayer::initializeGL()
+void QmYuvView::initializeGL()
 {
     d_->init();
 }
 
-void QmVideoPlayer::resizeGL(int w, int h)
+void QmYuvView::resizeGL(int w, int h)
 {
 }
 
-void QmVideoPlayer::paintGL()
+void QmYuvView::paintGL()
 {
     d_->paint();
+}
+
+void QmYuvView::setData(const QByteArray& yuv_data, const QSize& yuv_size)
+{
+    d_->setBuffer(yuv_data);
+    d_->setSize(yuv_size);
+    update();
 }
