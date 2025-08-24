@@ -43,4 +43,11 @@ if(COMMAND ParseDependTargets)
         add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
     endforeach()
+
+    install(FILES ${ffmpeg_targets} DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# 安装目标
+if(QMVIDEO_BUILD_SHARED_LIBS OR BUILD_SHARED_LIBS)
+    install(TARGETS ${TARGET_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()

@@ -223,7 +223,22 @@ void QmVideoDecoder::setOutputFormat(Format format)
 
 void QmVideoDecoder::play()
 {
-    if (d_->state != Waiting && d_->state != Paused) {
+    if (d_->state == Idle) {
+        return;
+    }
+    if (d_->state == Playing) {
+        stop();
+    }
+    d_->state = Playing;
+    if (!d_->thread->isRunning()) {
+        d_->stop_source = std::stop_source();
+        d_->thread->start();
+    }
+}
+
+void QmVideoDecoder::resume()
+{
+    if (d_->state != Paused) {
         return;
     }
     d_->state = Playing;
@@ -252,8 +267,28 @@ void QmVideoDecoder::stop()
         d_->thread->wait();
     }
     d_->frame_index = (d_->frame_step < 0) ? d_->frame_count : 0;
-    av_seek_frame(d_->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+    std::ignore = seekToFrameImpl(0);
     d_->state = Waiting;
+}
+
+void QmVideoDecoder::seekToFrame(qint64 frame_no)
+{
+    if (seekToFrameImpl(frame_no)) {
+        d_->frame_index = frame_no;
+    }
+}
+
+bool QmVideoDecoder::seekToFrameImpl(qint64 frame_no)
+{
+    if (d_->state == Idle) {
+        return false;
+    }
+    int64_t timestamp = static_cast<double>(frame_no) / d_->fps * AV_TIME_BASE;
+    if (av_seek_frame(d_->fmt_ctx, -1, timestamp, AVSEEK_FLAG_BACKWARD) < 0) {
+        return false;
+    }
+    avcodec_flush_buffers(d_->video_codec_ctx);
+    return true;
 }
 
 bool QmVideoDecoder::isPlaying() const
@@ -276,7 +311,7 @@ QSize QmVideoDecoder::size() const
     return d_->video_size;
 }
 
-QVariant QmVideoDecoder::decodeFrame(qint64 frame_no, int* error) const
+QVariant QmVideoDecoder::decodeFrame(qint64 frame_no, int* error)
 {
     std::unique_ptr<int> ffmpeg_ret_guard(new int);
     int* ret { nullptr };
@@ -289,11 +324,9 @@ QVariant QmVideoDecoder::decodeFrame(qint64 frame_no, int* error) const
         return {};
     }
     if (d_->frame_step != 1) {
-        int64_t timestamp = static_cast<double>(frame_no) / d_->fps * AV_TIME_BASE;
-        if ((*ret = av_seek_frame(d_->fmt_ctx, -1, timestamp, AVSEEK_FLAG_BACKWARD)) < 0) {
+        if (!seekToFrameImpl(frame_no)) {
             return {};
         }
-        avcodec_flush_buffers(d_->video_codec_ctx);
     }
 
     for (int attempts = 0; attempts < 20; ++attempts) {
@@ -322,11 +355,13 @@ QVariant QmVideoDecoder::decodeFrame(qint64 frame_no, int* error) const
                     //     // 其他类型（如 AV_PICTURE_TYPE_S、AV_PICTURE_TYPE_SI、AV_PICTURE_TYPE_SP 等）
                     //     break;
                     // }
-                    if (d_->format == Yuv420p) {
+
+                    auto package_unref_guard = qScopeGuard([this] {
                         av_packet_unref(d_->packet);
+                    });
+                    if (d_->format == Yuv420p) {
                         return decodeToYuv(d_->frame, d_->video_size.width(), d_->video_size.height());
                     } else {
-                        av_packet_unref(d_->packet);
                         return decodeToImage(d_->sws_ctx, d_->frame, d_->rgb_frame, d_->rgb_buffer, d_->video_size.width(), d_->video_size.height());
                     }
                 }
@@ -369,7 +404,7 @@ void QmVideoDecoder::run(std::stop_token st)
             if ((d_->frame_index > d_->frame_count || d_->frame_index < 0) || ret == AVERROR_EOF) {
                 if (d_->loop) {
                     d_->frame_index = (d_->frame_step < 0) ? d_->frame_count : 0;
-                    av_seek_frame(d_->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+                    std::ignore = seekToFrameImpl(d_->frame_index);
                 } else {
                     break;
                 }
