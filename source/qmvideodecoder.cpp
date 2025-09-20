@@ -278,6 +278,58 @@ void QmVideoDecoder::seekToFrame(qint64 frame_no)
     }
 }
 
+QVariant QmVideoDecoder::nextFrame()
+{
+    int ret = 0;
+    for (int attempts = 0; attempts < 30; ++attempts) {
+        ret = av_read_frame(d_->fmt_ctx, d_->packet);
+        // 读取文件末尾了
+        if (ret == AVERROR_EOF) {
+            return {};
+        }
+        if (ret < 0) {
+            continue;
+        }
+        if (d_->packet->stream_index == d_->video_stream_idx) {
+            if ((ret = avcodec_send_packet(d_->video_codec_ctx, d_->packet)) == 0) {
+                if ((ret = avcodec_receive_frame(d_->video_codec_ctx, d_->frame)) == 0) {
+                    // switch (d_->frame->pict_type) {
+                    // case AV_PICTURE_TYPE_I:
+                    //     qDebug() << "=> I: " << d_->frame->pts;
+                    //     break;
+                    // case AV_PICTURE_TYPE_P:
+                    //     qDebug() << "   P: " << d_->frame->pts;
+                    //     break;
+                    // case AV_PICTURE_TYPE_B:
+                    //     qDebug() << "   B: " << d_->frame->pts;
+                    //     break;
+                    // default:
+                    //     // 其他类型（如 AV_PICTURE_TYPE_S、AV_PICTURE_TYPE_SI、AV_PICTURE_TYPE_SP 等）
+                    //     break;
+                    // }
+
+                    auto package_unref_guard = qScopeGuard([this] {
+                        av_packet_unref(d_->packet);
+                    });
+                    if (d_->format == Yuv420p) {
+                        return decodeToYuv(d_->frame, d_->video_size.width(), d_->video_size.height());
+                    } else {
+                        return decodeToImage(d_->sws_ctx, d_->frame, d_->rgb_frame, d_->rgb_buffer, d_->video_size.width(), d_->video_size.height());
+                    }
+                }
+            }
+            av_packet_unref(d_->packet);
+        }
+    }
+    return {};
+}
+
+QVariant QmVideoDecoder::readFrame(qint64 frame_no)
+{
+    seekToFrame(frame_no);
+    return nextFrame();
+}
+
 bool QmVideoDecoder::seekToFrameImpl(qint64 frame_no)
 {
     if (d_->state == Idle) {
@@ -329,47 +381,7 @@ QVariant QmVideoDecoder::decodeFrame(qint64 frame_no, int* error)
         }
     }
 
-    for (int attempts = 0; attempts < 20; ++attempts) {
-        *ret = av_read_frame(d_->fmt_ctx, d_->packet);
-        // 读取文件末尾了
-        if (*ret == AVERROR_EOF) {
-            return {};
-        }
-        if (*ret < 0) {
-            continue;
-        }
-        if (d_->packet->stream_index == d_->video_stream_idx) {
-            if ((*ret = avcodec_send_packet(d_->video_codec_ctx, d_->packet)) == 0) {
-                if ((*ret = avcodec_receive_frame(d_->video_codec_ctx, d_->frame)) == 0) {
-                    // switch (d_->frame->pict_type) {
-                    // case AV_PICTURE_TYPE_I:
-                    //     qDebug() << "=> I: " << d_->frame->pts;
-                    //     break;
-                    // case AV_PICTURE_TYPE_P:
-                    //     qDebug() << "   P: " << d_->frame->pts;
-                    //     break;
-                    // case AV_PICTURE_TYPE_B:
-                    //     qDebug() << "   B: " << d_->frame->pts;
-                    //     break;
-                    // default:
-                    //     // 其他类型（如 AV_PICTURE_TYPE_S、AV_PICTURE_TYPE_SI、AV_PICTURE_TYPE_SP 等）
-                    //     break;
-                    // }
-
-                    auto package_unref_guard = qScopeGuard([this] {
-                        av_packet_unref(d_->packet);
-                    });
-                    if (d_->format == Yuv420p) {
-                        return decodeToYuv(d_->frame, d_->video_size.width(), d_->video_size.height());
-                    } else {
-                        return decodeToImage(d_->sws_ctx, d_->frame, d_->rgb_frame, d_->rgb_buffer, d_->video_size.width(), d_->video_size.height());
-                    }
-                }
-            }
-            av_packet_unref(d_->packet);
-        }
-    }
-    return {};
+    return nextFrame();
 }
 
 void QmVideoDecoder::run(std::stop_token st)

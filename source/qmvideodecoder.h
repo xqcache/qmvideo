@@ -42,6 +42,7 @@ public:
     void setOutputFormat(Format format);
 
     void seekToFrame(qint64 frame_no);
+    QVariant readFrame(qint64 frame_no);
 
     void play();
     void resume();
@@ -55,8 +56,9 @@ signals:
 
 private:
     void run(std::stop_token st);
-    QVariant decodeFrame(qint64 frame_no, int* error = nullptr);
     bool seekToFrameImpl(qint64 frame_no);
+    QVariant nextFrame();
+    QVariant decodeFrame(qint64 frame_no, int* error = nullptr);
 
 private:
     QmVideoDecoderPrivate* d_ { nullptr };
