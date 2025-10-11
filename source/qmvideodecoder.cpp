@@ -280,47 +280,87 @@ void QmVideoDecoder::seekToFrame(qint64 frame_no)
 
 QVariant QmVideoDecoder::nextFrame()
 {
+    auto processFrame = [this]() -> QVariant {
+        // switch (d_->frame->pict_type) {
+        // case AV_PICTURE_TYPE_I:
+        //     qDebug() << "=> I:" << d_->frame->pts;
+        //     break;
+        // case AV_PICTURE_TYPE_P:
+        //     qDebug() << "   P:" << d_->frame->pts;
+        //     break;
+        // case AV_PICTURE_TYPE_B:
+        //     qDebug() << "   B:" << d_->frame->pts;
+        //     break;
+        // default:
+        //     break;
+        // }
+
+        if (d_->format == Yuv420p) {
+            return decodeToYuv(d_->frame,
+                d_->video_size.width(),
+                d_->video_size.height());
+        } else {
+            return decodeToImage(d_->sws_ctx,
+                d_->frame,
+                d_->rgb_frame,
+                d_->rgb_buffer,
+                d_->video_size.width(),
+                d_->video_size.height());
+        }
+    };
     int ret = 0;
-    for (int attempts = 0; attempts < 30; ++attempts) {
+    int attempt_count = 0;
+
+    while (attempt_count < 50) {
         ret = av_read_frame(d_->fmt_ctx, d_->packet);
-        // 读取文件末尾了
+
+        // 文件末尾，执行 flush
         if (ret == AVERROR_EOF) {
+            avcodec_send_packet(d_->video_codec_ctx, nullptr);
+            while ((ret = avcodec_receive_frame(d_->video_codec_ctx, d_->frame)) >= 0) {
+                return processFrame();
+            }
             return {};
         }
+
+        // 其他错误跳过
         if (ret < 0) {
+            ++attempt_count;
             continue;
         }
-        if (d_->packet->stream_index == d_->video_stream_idx) {
-            if ((ret = avcodec_send_packet(d_->video_codec_ctx, d_->packet)) == 0) {
-                if ((ret = avcodec_receive_frame(d_->video_codec_ctx, d_->frame)) == 0) {
-                    // switch (d_->frame->pict_type) {
-                    // case AV_PICTURE_TYPE_I:
-                    //     qDebug() << "=> I: " << d_->frame->pts;
-                    //     break;
-                    // case AV_PICTURE_TYPE_P:
-                    //     qDebug() << "   P: " << d_->frame->pts;
-                    //     break;
-                    // case AV_PICTURE_TYPE_B:
-                    //     qDebug() << "   B: " << d_->frame->pts;
-                    //     break;
-                    // default:
-                    //     // 其他类型（如 AV_PICTURE_TYPE_S、AV_PICTURE_TYPE_SI、AV_PICTURE_TYPE_SP 等）
-                    //     break;
-                    // }
+        attempt_count = 0;
 
-                    auto package_unref_guard = qScopeGuard([this] {
-                        av_packet_unref(d_->packet);
-                    });
-                    if (d_->format == Yuv420p) {
-                        return decodeToYuv(d_->frame, d_->video_size.width(), d_->video_size.height());
-                    } else {
-                        return decodeToImage(d_->sws_ctx, d_->frame, d_->rgb_frame, d_->rgb_buffer, d_->video_size.width(), d_->video_size.height());
-                    }
-                }
-            }
+        // 跳过非视频流
+        if (d_->packet->stream_index != d_->video_stream_idx) {
             av_packet_unref(d_->packet);
+            continue;
+        }
+
+        // 发送 packet
+        ret = avcodec_send_packet(d_->video_codec_ctx, d_->packet);
+        av_packet_unref(d_->packet);
+        if (ret < 0) {
+            ++attempt_count;
+            continue;
+        }
+
+        // 接收帧
+        while ((ret = avcodec_receive_frame(d_->video_codec_ctx, d_->frame)) >= 0) {
+            return processFrame();
+        }
+
+        // 需要更多输入
+        if (ret == AVERROR(EAGAIN)) {
+            continue;
+        }
+        // 解码结束
+        else if (ret == AVERROR_EOF) {
+            return {};
+        } else {
+            ++attempt_count;
         }
     }
+
     return {};
 }
 
